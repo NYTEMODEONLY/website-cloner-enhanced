@@ -1,6 +1,6 @@
-# Website Cloner
+# Website Cloner Enhanced
 
-The Website Cloner is a Python script that recursively downloads an entire website, including its HTML, CSS, JavaScript, images, and other media resources. This tool preserves the website's directory structure and is useful for archiving websites or offline browsing.
+The Website Cloner Enhanced is a Python script that recursively downloads an entire website, including its HTML, CSS, JavaScript, images, and other media resources. This tool preserves the website's directory structure and is useful for archiving websites or offline browsing.
 
 ## Features
 
@@ -111,3 +111,6 @@ pip install requests beautifulsoup4 rich
 
 ## License
 This project is licensed under the MIT License.
+
+---
+Created by NYTEMODE
