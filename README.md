@@ -113,4 +113,4 @@ pip install requests beautifulsoup4 rich
 This project is licensed under the MIT License.
 
 ---
-Created by NYTEMODE
+Forked with ❤️ by [NYTEMODE](https://nytemode.com)
