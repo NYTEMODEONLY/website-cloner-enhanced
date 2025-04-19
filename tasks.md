@@ -5,78 +5,80 @@
 ### Core Functionality
 - [x] Implemented recursive website crawling functionality
 - [x] Added preservation of original website directory structure
+- [x] Improved resource handling (CSS, JS, images, media files)
 - [x] Implemented link rewriting to point to local files
 - [x] Added cycle detection to prevent infinite loops
 - [x] Implemented external resource handling in separate folders
-
-### Resource Handling
-- [x] Improved resource handling (CSS, JS, images, media files)
-- [x] Added support for iframe and data-src attributes
 - [x] Added streaming download for large files
 - [x] Implemented file skipping for already downloaded resources
-- [x] Implemented resource validation and verification
-- [x] Added retry mechanism with exponential backoff
 
-### Path and Directory Management
-- [x] Improved directory handling with proper permissions
-- [x] Fixed directory handling error for paths without file extensions
-- [x] Added robust path validation and normalization
-- [x] Added safeguards against absolute path creation
-
-### User Interface and Experience
-- [x] Enhanced live animation with continuous spinner updates
-- [x] Added high-frequency display refresh for smoother animations
-- [x] Improved progress tracking during long operations
-- [x] Added real-time ETA calculation and display
-- [x] Added command-line interface with arguments
+### User Experience
 - [x] Added real-time progress display with statistics
 - [x] Implemented live file download tracking
+- [x] Added animated spinner for real-time feedback
 - [x] Added progress bar and download metrics
+- [x] Added command-line interface with arguments
 
-### Error Handling and Logging
+### Error Handling and Reliability
 - [x] Enhanced error handling to continue processing after failures
 - [x] Added detailed error reporting and status updates
 - [x] Improved initialization and connection testing
-- [x] Implemented comprehensive logging system
-- [x] Improved handling of non-HTML content types
+- [x] Implemented resource validation and verification
+- [x] Added retry mechanism with exponential backoff
+- [x] Improved directory handling with proper permissions
 
-### Performance and Throttling
+### Performance and Optimization
 - [x] Added rate limiting with configurable delays
-- [x] Enhanced rate limiter with status message display
+- [x] Implemented comprehensive logging system
+- [x] Added resource type detection
+- [x] Added validation of file integrity
 
-### Template Website Support
-- [x] Added direct asset cloning for template-style websites with relative paths (./assets/)
-- [x] Implemented automatic detection of website structure type
-- [x] Added specialized HTML parsing for relative path websites
-- [x] Added batch asset downloading with progress tracking
+### Website Type Support
+- [x] Implemented template site detection
+- [x] Added specialized handling for template-style websites
+- [x] Unified standard and template site handling in a single script
+- [x] Added smart handling of relative paths (./assets/)
+- [x] Improved asset discovery across all page types
 
-### Documentation
+### Documentation and Maintenance
 - [x] Updated README with comprehensive documentation
 - [x] Created requirements.txt for easy dependency installation
+- [x] Added detailed tasks.md with progress tracking
+- [x] Included examples and usage instructions
 
-## Planned Improvements
+## Potential Upgrades
 
 ### High Priority
-- [ ] Add depth limiting option to control crawl depth
-- [ ] Implement proper handling of JavaScript-rendered content
-- [ ] Add resume capability for interrupted downloads
-- [ ] Add cookie/session support for authenticated websites
-- [ ] Implement robots.txt compliance
+- [ ] **Depth Limiting**: Add option to limit crawl depth for partial website cloning
+- [ ] **Domain Filtering**: Option to include/exclude specific domains when crawling
+- [ ] **Parallel Downloads**: Use async/threading for faster downloads
+- [ ] **Resume Capability**: Option to resume interrupted downloads
+- [ ] **URL Filtering**: Support regex patterns to include/exclude URLs
 
 ### Medium Priority
-- [ ] Implement parallel downloads using async/threading
-- [ ] Add user agent rotation to avoid detection
-- [ ] Add sitemap support for better discovery
-- [ ] Add resource compression options
-- [ ] Implement HTML validation
+- [ ] **Cookie/Session Handling**: Support for authenticated websites
+- [ ] **Custom Headers**: Allow user to specify custom headers for requests
+- [ ] **Robots.txt Compliance**: Respect robots.txt directives
+- [ ] **Sitemap Support**: Use XML sitemaps to discover pages
+- [ ] **Dynamic Content Handling**: Support for JavaScript-rendered content using tools like Selenium
+- [ ] **Proxy Support**: Allow use of proxies for requests
+- [ ] **Resource Compression**: Option to optimize downloaded resources
+- [ ] **Content Type Filtering**: Option to filter by specific content types
 
-### Lower Priority
-- [ ] Add domain filtering options
-- [ ] Add custom headers support
-- [ ] Add URL pattern filtering
-- [ ] Implement proxy support
-- [ ] Add configuration file support
-- [ ] Add batch processing for multiple websites
+### Low Priority
+- [ ] **Batch Processing**: Support for cloning multiple websites in sequence
+- [ ] **Configuration File**: Support for loading settings from a config file
+- [ ] **HTML Validation**: Verify downloaded HTML is valid and complete
+- [ ] **Resource Optimization**: Option to minify CSS/JS files
+- [ ] **Image Optimization**: Option to compress images while maintaining quality
+- [ ] **Cache Control**: Better handling of cache headers and caching
+- [ ] **Redirect Handling**: Improved handling of HTTP redirects
+- [ ] **SSL/TLS Options**: Configurable SSL/TLS settings for secure connections
+- [ ] **User Agent Rotation**: Rotate user agents to avoid detection
+- [ ] **Rate Limit Detection**: Detect and adapt to website rate limits
+- [ ] **Resource Prioritization**: Prioritize critical resources first
+- [ ] **Memory Management**: Optimize memory usage for large websites
+- [ ] **Cross-Platform Support**: Ensure consistent behavior across operating systems
 
 ## Known Limitations
 
@@ -86,22 +88,38 @@
 - Does not handle form submissions or interactive elements
 - Handles only HTTP/HTTPS protocols
 - No control over crawl order or prioritization
+- Cannot handle some complex relative URLs correctly
 - May encounter issues with websites using aggressive anti-scraping measures
+- Limited support for websites with complex URL structures
 - No handling of websites that require specific browser features
 - May miss resources loaded via WebSocket connections
 - No support for websites using CAPTCHA or other human verification
 
 ## Implementation Notes
 
-Future improvements should focus on enhancing the tool's flexibility while respecting web scraping ethics. Key priorities:
+### Current Focus
+Our unified website cloner now handles both standard websites and template-style websites in a single script:
 
-1. Implement depth limiting to control how deep the crawler goes
-2. Add support for JavaScript-rendered content to handle modern websites
+1. For standard websites:
+   - Uses recursive crawling for comprehensive site mapping
+   - Follows standard link structure
+   - Processes pages breadth-first
+
+2. For template websites:
+   - Automatically detects template-style sites
+   - Uses specialized handling for relative paths
+   - Extracts and downloads assets directly
+   - Preserves original directory structure
+
+### Future Priorities
+
+1. Add depth limiting for controlled partial downloads
+2. Implement parallel downloading for improved performance
 3. Add resume capability for interrupted downloads
-4. Add cookie/session support for authenticated websites
-5. Implement robots.txt compliance for ethical crawling
-6. Add user agent rotation to avoid detection
-7. Implement parallel downloads for better performance
-8. Improve memory management for large websites
-9. Add sitemap support for better discovery
-10. Implement better URL normalization and handling 
+4. Improve handling of authenticated websites
+5. Add support for dynamic content (JavaScript-rendered pages)
+6. Implement better memory management for large websites
+7. Improve handling of anti-scraping measures
+8. Add support for WebSocket connections
+9. Enhance URL normalization and handling
+10. Add support for regex-based URL filtering 
