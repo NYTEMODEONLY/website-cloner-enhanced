@@ -690,9 +690,271 @@ def ensure_directory(path):
         logger.error(f"Failed to create directory {path}: {e}")
         return False
 
+def is_template_site(url):
+    """
+    Detect if a website is a template-style site with relative paths.
+    Returns True if the site appears to be a template.
+    """
+    # Check URL patterns common in template sites
+    if '/HTML/' in url or '/html/' in url:
+        return True
+    
+    # Check content for template-style path references
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            content = response.text.lower()
+            # Look for common template path patterns
+            if './assets/' in content or 'assets/css/' in content or 'assets/js/' in content:
+                return True
+    except:
+        pass
+        
+    return False
+
+def download_file(url, output_path, rate_limiter=None, stats=None, progress=None, task_id=None):
+    """Download a file with progress tracking"""
+    try:
+        # Create directory if it doesn't exist
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        
+        # Skip if file exists
+        if os.path.exists(output_path):
+            if stats:
+                stats.add_skipped()
+            if progress:
+                progress.advance(task_id)
+            return True
+
+        # Apply rate limiting if configured
+        if rate_limiter:
+            rate_limiter.wait(stats)
+
+        # Download the file
+        response = requests.get(url, headers=headers, stream=True)
+        response.raise_for_status()
+        
+        # Get content length if available
+        total_size = int(response.headers.get('content-length', 0)) or None
+        
+        # Update progress bar total if we have content length
+        if progress and task_id and total_size:
+            progress.update(task_id, total=total_size)
+            
+        # Download with progress tracking
+        with open(output_path, 'wb') as f:
+            downloaded = 0
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if stats:
+                        stats.update_download_speed(len(chunk))
+                    if progress and task_id:
+                        progress.update(task_id, completed=downloaded)
+                        
+        if stats:
+            stats.add_resource(downloaded)
+            
+        return True
+    except Exception as e:
+        if stats:
+            stats.add_error()
+        logger.error(f"Failed to download {url}: {e}")
+        return False
+
+def clone_template_site(url, output_dir, rate_limiter=None, stats=None):
+    """Clone a template-style website with assets in relative paths"""
+    # Make stats object if not provided
+    if stats is None:
+        stats = WebsiteStats()
+        
+    # Parse URL components
+    parsed_url = urlparse(url)
+    base_domain = f"{parsed_url.scheme}://{parsed_url.netloc}"
+    base_path = os.path.dirname(parsed_url.path)
+    if not base_path.endswith('/'):
+        base_path += '/'
+    
+    # For URL joining
+    base_url = base_domain + base_path
+    
+    # Create output directory
+    ensure_directory(output_dir)
+    
+    # Download the main page
+    if rate_limiter:
+        rate_limiter.wait(stats)
+    
+    stats.update_status(f"Processing template site: {url}")
+    stats.update_current_file(f"Downloading main HTML")
+    
+    response = requests.get(url, headers=headers)
+    response.raise_for_status()
+    
+    # Save the main HTML file
+    filename = os.path.basename(parsed_url.path) or 'index.html'
+    main_html_path = os.path.join(output_dir, filename)
+    
+    with open(main_html_path, 'w', encoding='utf-8') as f:
+        f.write(response.text)
+    
+    stats.add_processed()
+    
+    # Parse HTML to extract asset links
+    soup = BeautifulSoup(response.text, 'html.parser')
+    
+    # Extract all asset links
+    asset_links = []
+    
+    # CSS files
+    for link in soup.find_all('link', rel='stylesheet'):
+        if 'href' in link.attrs:
+            asset_links.append(link['href'])
+    
+    # JavaScript files
+    for script in soup.find_all('script', src=True):
+        asset_links.append(script['src'])
+    
+    # Images
+    for img in soup.find_all('img', src=True):
+        asset_links.append(img['src'])
+        
+    # Background images in style tags
+    for style in soup.find_all('style'):
+        bg_urls = re.findall(r'url\([\'"]?(.*?)[\'"]?\)', style.string or '')
+        asset_links.extend(bg_urls)
+        
+    # Background images in inline styles
+    for elem in soup.find_all(style=True):
+        bg_urls = re.findall(r'url\([\'"]?(.*?)[\'"]?\)', elem['style'])
+        asset_links.extend(bg_urls)
+    
+    # Other resources like fonts, videos, etc.
+    for tag in soup.find_all(['video', 'audio', 'source', 'embed', 'object']):
+        for attr in ['src', 'data', 'poster']:
+            if attr in tag.attrs:
+                asset_links.append(tag[attr])
+    
+    # Remove duplicates and filter out unwanted URLs
+    asset_links = list(set(asset_links))
+    asset_links = [link for link in asset_links if link and not link.startswith(('http://', 'https://', 'data:', '#'))]
+    
+    # Download all assets
+    for asset_path in asset_links:
+        # Handle relative paths correctly
+        if asset_path.startswith('/'):
+            # Absolute path from domain root
+            asset_url = base_domain + asset_path
+            local_path = os.path.join(output_dir, asset_path.lstrip('/'))
+        else:
+            # Relative path from base directory
+            asset_url = urljoin(base_url, asset_path)
+            local_path = os.path.join(output_dir, asset_path)
+        
+        stats.update_current_file(f"Downloading: {asset_path}")
+        download_file(asset_url, local_path, rate_limiter, stats)
+    
+    # Find and download HTML pages linked from the main page
+    html_links = []
+    for a in soup.find_all('a', href=True):
+        href = a['href']
+        # Only include relative links that likely point to HTML pages
+        if (href.endswith('.html') or '.' not in os.path.basename(href)) and not href.startswith(('http://', 'https://', '#')):
+            html_links.append(href)
+    
+    # Remove duplicates
+    html_links = list(set(html_links))
+    
+    # Download and process all linked HTML files
+    for html_path in html_links:
+        if html_path.startswith('/'):
+            # Absolute path from domain root
+            html_url = base_domain + html_path
+            local_path = os.path.join(output_dir, html_path.lstrip('/'))
+        else:
+            # Relative path from base directory
+            html_url = urljoin(base_url, html_path)
+            local_path = os.path.join(output_dir, html_path)
+        
+        # Handle directory-like paths (without extension)
+        if '.' not in os.path.basename(local_path):
+            local_path = os.path.join(local_path, 'index.html')
+        
+        stats.update_current_file(f"Downloading HTML: {html_path}")
+        
+        # Download the HTML file
+        try:
+            if rate_limiter:
+                rate_limiter.wait(stats)
+                
+            response = requests.get(html_url, headers=headers)
+            response.raise_for_status()
+            
+            # Create directory if needed
+            os.makedirs(os.path.dirname(local_path), exist_ok=True)
+            
+            # Save the HTML file
+            with open(local_path, 'w', encoding='utf-8') as f:
+                f.write(response.text)
+            
+            stats.add_processed()
+            
+            # Parse this HTML to find additional assets
+            sub_soup = BeautifulSoup(response.text, 'html.parser')
+            sub_assets = []
+            
+            # CSS files
+            for link in sub_soup.find_all('link', rel='stylesheet'):
+                if 'href' in link.attrs:
+                    sub_assets.append(link['href'])
+            
+            # JavaScript files
+            for script in sub_soup.find_all('script', src=True):
+                sub_assets.append(script['src'])
+            
+            # Images
+            for img in sub_soup.find_all('img', src=True):
+                sub_assets.append(img['src'])
+            
+            # Filter and download the additional assets
+            sub_assets = list(set(sub_assets))
+            sub_assets = [link for link in sub_assets if link and 
+                          not link.startswith(('http://', 'https://', 'data:', '#'))]
+            
+            # Get relative directory for this HTML file
+            html_dir = os.path.dirname(html_path)
+            
+            for sub_asset in sub_assets:
+                if sub_asset.startswith('/'):
+                    # Absolute path from domain root
+                    asset_url = base_domain + sub_asset
+                    sub_local_path = os.path.join(output_dir, sub_asset.lstrip('/'))
+                else:
+                    # Relative path from this HTML file's directory
+                    if html_dir:
+                        asset_url = urljoin(base_url + html_dir + '/', sub_asset)
+                    else:
+                        asset_url = urljoin(base_url, sub_asset)
+                    sub_local_path = os.path.join(output_dir, html_dir, sub_asset)
+                
+                stats.update_current_file(f"Downloading sub-asset: {sub_asset}")
+                
+                # Download without detailed progress
+                os.makedirs(os.path.dirname(sub_local_path), exist_ok=True)
+                if not os.path.exists(sub_local_path):
+                    download_file(asset_url, sub_local_path, rate_limiter, stats)
+                    
+        except Exception as e:
+            stats.add_error()
+            logger.error(f"Failed to download HTML page {html_url}: {e}")
+    
+    return stats
+
 def clone_website(base_url, base_folder, min_delay=1.0, max_delay=3.0, debug=False):
     """
     Clone a website by recursively downloading all pages and resources.
+    Automatically detects and handles template-style websites.
     """
     # Initialize logging
     global logger
@@ -712,80 +974,6 @@ def clone_website(base_url, base_folder, min_delay=1.0, max_delay=3.0, debug=Fal
     base_path = os.path.dirname(parsed_base.path)
     if not base_path.endswith('/'):
         base_path += '/'
-    
-    # Special function to directly download resources with relative paths
-    def download_relative_resource(rel_path, base_page_url):
-        # Handle paths starting with ./
-        if rel_path.startswith('./'):
-            rel_path = rel_path[2:]
-            
-        # Get the base directory of the current page
-        page_dir = os.path.dirname(urlparse(base_page_url).path)
-        if not page_dir.endswith('/'):
-            page_dir += '/'
-            
-        # Create the full URL
-        full_url = urljoin(base_domain + page_dir, rel_path)
-        
-        # Determine output path
-        page_dir_parts = page_dir.strip('/').split('/')
-        rel_path_parts = rel_path.strip('/').split('/')
-        
-        # Combine parts to create output directory
-        output_parts = []
-        for part in page_dir_parts:
-            if part:  # Skip empty parts
-                output_parts.append(part)
-                
-        # Add rel_path_parts excluding the filename which will be handled by download_resource
-        if rel_path_parts:
-            for part in rel_path_parts[:-1]:
-                if part:  # Skip empty parts
-                    output_parts.append(part)
-                    
-        # Create the final output path
-        if output_parts:
-            output_dir = os.path.join(base_folder, *output_parts)
-        else:
-            output_dir = base_folder
-            
-        # Ensure the output directory exists
-        os.makedirs(output_dir, exist_ok=True)
-        
-        # Create the full output path including filename
-        if rel_path_parts and rel_path_parts[-1]:
-            output_path = os.path.join(output_dir, rel_path_parts[-1])
-        else:
-            # If no filename, use index.html
-            output_path = os.path.join(output_dir, 'index.html')
-        
-        # Download the resource
-        logger.info(f"Directly downloading: {full_url} -> {output_path}")
-        return download_resource(full_url, output_path, rate_limiter, stats)
-    
-    # Initialize the queue with the base URL
-    queue = [base_url]
-    
-    # Add common asset paths to check
-    # These are paths that are commonly used for resources in websites
-    common_asset_paths = [
-        'assets/', 'css/', 'js/', 'images/', 'img/', 'fonts/',
-        'media/', 'videos/', 'audio/', 'documents/', 'downloads/'
-    ]
-    
-    # Add these paths to the queue to make sure we check them
-    for asset_path in common_asset_paths:
-        # Try both the domain root and any subdirectory path
-        asset_url = urljoin(base_domain, asset_path)
-        queue.append(asset_url)
-        
-        # If the base URL has a path component, also try from there
-        if base_path and base_path != '/':
-            asset_url = urljoin(base_domain + base_path, asset_path)
-            queue.append(asset_url)
-    
-    # Keep track of visited URLs to avoid cycles
-    visited = set()
     
     # Ensure output directory exists
     if not ensure_directory(proper_base_folder):
@@ -812,163 +1000,168 @@ def clone_website(base_url, base_folder, min_delay=1.0, max_delay=3.0, debug=Fal
             response = requests.get(base_url, headers=headers, timeout=10)
             response.raise_for_status()
             
-            stats.update_status("Connection successful, starting download...")
-            logger.info("Connection successful, starting download...")
+            stats.update_status("Connection successful, detecting site type...")
+            logger.info("Connection successful, detecting site type...")
+            live.update(get_stats_panel(stats))
             
-            # For spinner updates
-            last_spinner_update = time.time()
+            # Check if this is a template-style website
+            is_template = is_template_site(base_url)
             
-            # Process the first page to find assets
-            soup = BeautifulSoup(response.text, "html.parser")
-            
-            # Directly download CSS files
-            for css in soup.find_all('link', {'rel': ['stylesheet']}):
-                if 'href' in css.attrs:
-                    css_url = css['href']
-                    if css_url.startswith('./'):
-                        download_relative_resource(css_url, base_url)
-            
-            # Directly download JavaScript files
-            for script in soup.find_all('script', {'src': True}):
-                script_url = script['src']
-                if script_url.startswith('./'):
-                    download_relative_resource(script_url, base_url)
-            
-            # Directly download images
-            for img in soup.find_all('img', {'src': True}):
-                img_url = img['src']
-                if img_url.startswith('./'):
-                    download_relative_resource(img_url, base_url)
-            
-            while queue:
-                current_url = queue.pop(0)
-                
-                # Keep spinner animated regardless of progress
-                current_time = time.time()
-                if current_time - last_spinner_update >= 0.1:
-                    stats.get_spinner()  # Forces spinner update
-                    live.update(get_stats_panel(stats))
-                    last_spinner_update = current_time
-                
-                # Skip if already visited
-                if current_url in visited:
-                    continue
-                    
-                visited.add(current_url)
-                stats.add_url(current_url)
-                stats.update_status(f"Processing: {current_url}")
-                logger.info(f"Processing URL: {current_url}")
+            if is_template:
+                # Use template site cloning approach
+                stats.update_status("Detected template-style website, using specialized cloning...")
+                logger.info("Detected template-style website, using specialized cloning...")
                 live.update(get_stats_panel(stats))
                 
-                try:
-                    # Apply rate limiting
-                    rate_limiter.wait(stats)
+                # Perform template site cloning
+                clone_template_site(base_url, proper_base_folder, rate_limiter, stats)
+                
+                # Keep updating display during processing
+                last_update_time = time.time()
+                while time.time() - last_update_time < 0.5:
+                    stats.get_spinner()  # Update spinner
+                    live.update(get_stats_panel(stats))
+                    time.sleep(0.1)
                     
-                    response = requests.get(current_url, headers=headers, timeout=10)
-                    response.raise_for_status()
+            else:
+                # For regular websites, use recursive crawling approach
+                stats.update_status("Using recursive crawling for standard website...")
+                logger.info("Using recursive crawling for standard website...")
+                live.update(get_stats_panel(stats))
+                
+                # Initialize the queue with the base URL
+                queue = [base_url]
+                
+                # Add common asset paths to check
+                common_asset_paths = [
+                    'assets/', 'css/', 'js/', 'images/', 'img/', 'fonts/',
+                    'media/', 'videos/', 'audio/', 'documents/', 'downloads/'
+                ]
+                
+                # Add these paths to the queue to make sure we check them
+                for asset_path in common_asset_paths:
+                    # Try both the domain root and any subdirectory path
+                    asset_url = urljoin(base_domain, asset_path)
+                    queue.append(asset_url)
                     
-                    # Check content type
-                    content_type = response.headers.get('Content-Type', '').lower()
+                    # If the base URL has a path component, also try from there
+                    if base_path and base_path != '/':
+                        asset_url = urljoin(base_domain + base_path, asset_path)
+                        queue.append(asset_url)
+                
+                # Keep track of visited URLs to avoid cycles
+                visited = set()
+                
+                # For spinner updates
+                last_spinner_update = time.time()
+                
+                while queue:
+                    current_url = queue.pop(0)
                     
-                    # Only process HTML-like content for link extraction
-                    if not any(html_type in content_type for html_type in ['text/html', 'application/xhtml']):
-                        stats.update_status(f"Non-HTML content detected: {current_url}")
-                        logger.info(f"Skipping non-HTML content ({content_type}): {current_url}")
+                    # Keep spinner animated regardless of progress
+                    current_time = time.time()
+                    if current_time - last_spinner_update >= 0.1:
+                        stats.get_spinner()  # Forces spinner update
+                        live.update(get_stats_panel(stats))
+                        last_spinner_update = current_time
+                    
+                    # Skip if already visited
+                    if current_url in visited:
+                        continue
                         
-                        # For non-HTML content, still save the file but don't process it
+                    visited.add(current_url)
+                    stats.add_url(current_url)
+                    stats.update_status(f"Processing: {current_url}")
+                    logger.info(f"Processing URL: {current_url}")
+                    live.update(get_stats_panel(stats))
+                    
+                    try:
+                        # Apply rate limiting
+                        rate_limiter.wait(stats)
+                        
+                        response = requests.get(current_url, headers=headers, timeout=10)
+                        response.raise_for_status()
+                        
+                        # Check content type
+                        content_type = response.headers.get('Content-Type', '').lower()
+                        
+                        # Only process HTML-like content for link extraction
+                        if not any(html_type in content_type for html_type in ['text/html', 'application/xhtml']):
+                            stats.update_status(f"Non-HTML content detected: {current_url}")
+                            logger.info(f"Skipping non-HTML content ({content_type}): {current_url}")
+                            
+                            # For non-HTML content, still save the file but don't process it
+                            local_path = get_resource_path(current_url, base_url, proper_base_folder)
+                            
+                            # Check if directory exists at this path and handle appropriately
+                            if os.path.isdir(local_path):
+                                # If it's supposed to be a file but a directory exists, create a file with a different name
+                                parsed = urlparse(current_url)
+                                filename = os.path.basename(parsed.path) or 'index'
+                                local_path = os.path.join(os.path.dirname(local_path), f"{filename}.bin")
+                            
+                            # Ensure directory exists
+                            dir_path = os.path.dirname(local_path)
+                            if not ensure_directory(dir_path):
+                                logger.error(f"Failed to create directory for: {local_path}")
+                                continue
+                                
+                            # Save the raw content without processing
+                            with open(local_path, 'wb') as file:
+                                file.write(response.content)
+                                
+                            stats.add_resource(len(response.content))
+                            stats.update_status(f"Saved non-HTML content: {current_url}")
+                            continue
+                            
+                        # For HTML content, proceed with normal processing
+                        # Determine the local path for this URL
                         local_path = get_resource_path(current_url, base_url, proper_base_folder)
+                        stats.update_current_file(f"Processing: {os.path.basename(local_path)}")
+                        live.update(get_stats_panel(stats))
                         
                         # Check if directory exists at this path and handle appropriately
                         if os.path.isdir(local_path):
-                            # If it's supposed to be a file but a directory exists, create a file with a different name
-                            parsed = urlparse(current_url)
-                            filename = os.path.basename(parsed.path) or 'index'
-                            local_path = os.path.join(os.path.dirname(local_path), f"{filename}.bin")
+                            # If it's a directory, use index.html inside it
+                            local_path = os.path.join(os.path.dirname(local_path), 
+                                                    os.path.basename(os.path.dirname(local_path)), 
+                                                    'index.html')
                         
                         # Ensure directory exists
-                        dir_path = os.path.dirname(local_path)
-                        if not ensure_directory(dir_path):
+                        if not ensure_directory(os.path.dirname(local_path)):
                             logger.error(f"Failed to create directory for: {local_path}")
                             continue
-                            
-                        # Save the raw content without processing
-                        with open(local_path, 'wb') as file:
-                            file.write(response.content)
-                            
-                        stats.add_resource(len(response.content))
-                        stats.update_status(f"Saved non-HTML content: {current_url}")
-                        continue
                         
-                    # For HTML content, proceed with normal processing
-                    # Determine the local path for this URL
-                    local_path = get_resource_path(current_url, base_url, proper_base_folder)
-                    stats.update_current_file(f"Processing: {os.path.basename(local_path)}")
-                    live.update(get_stats_panel(stats))
-                    
-                    # Check if directory exists at this path and handle appropriately
-                    if os.path.isdir(local_path):
-                        # If it's a directory, use index.html inside it
-                        local_path = os.path.join(os.path.dirname(local_path), 
-                                                 os.path.basename(os.path.dirname(local_path)), 
-                                                 'index.html')
-                    
-                    # Ensure directory exists
-                    if not ensure_directory(os.path.dirname(local_path)):
-                        logger.error(f"Failed to create directory for: {local_path}")
-                        continue
-                    
-                    # Process HTML content to extract resources and links
-                    soup = BeautifulSoup(response.text, "html.parser")
-                    
-                    # Directly download CSS files from this page
-                    for css in soup.find_all('link', {'rel': ['stylesheet']}):
-                        if 'href' in css.attrs:
-                            css_url = css['href']
-                            if css_url.startswith('./'):
-                                download_relative_resource(css_url, current_url)
-                    
-                    # Directly download JavaScript files
-                    for script in soup.find_all('script', {'src': True}):
-                        script_url = script['src']
-                        if script_url.startswith('./'):
-                            download_relative_resource(script_url, current_url)
-                    
-                    # Directly download images
-                    for img in soup.find_all('img', {'src': True}):
-                        img_url = img['src']
-                        if img_url.startswith('./'):
-                            download_relative_resource(img_url, current_url)
-                    
-                    # Process the HTML content
-                    processed_html, new_links = process_html(response.text, current_url, base_url, proper_base_folder, rate_limiter, stats, live)
-                    
-                    # Save the processed HTML
-                    with open(local_path, 'w', encoding='utf-8') as file:
-                        file.write(processed_html)
+                        # Process the HTML content
+                        processed_html, new_links = process_html(response.text, current_url, base_url, proper_base_folder, rate_limiter, stats, live)
                         
-                    # Add new internal links to the queue
-                    for link in new_links:
-                        if link not in visited:
-                            queue.append(link)
+                        # Save the processed HTML
+                        with open(local_path, 'w', encoding='utf-8') as file:
+                            file.write(processed_html)
                             
-                    stats.add_processed()
-                    stats.update_status(f"Completed: {current_url}")
-                    logger.info(f"Successfully processed: {current_url}")
+                        # Add new internal links to the queue
+                        for link in new_links:
+                            if link not in visited:
+                                queue.append(link)
+                                
+                        stats.add_processed()
+                        stats.update_status(f"Completed: {current_url}")
+                        logger.info(f"Successfully processed: {current_url}")
+                        
+                    except requests.exceptions.RequestException as e:
+                        stats.add_error()
+                        stats.update_status(f"Error: {str(e)}")
+                        logger.error(f"Error processing {current_url}: {e}")
+                        live.update(get_stats_panel(stats))
+                    except Exception as e:
+                        stats.add_error()
+                        stats.update_status(f"Unexpected error: {str(e)}")
+                        logger.error(f"Unexpected error processing {current_url}: {e}")
+                        live.update(get_stats_panel(stats))
                     
-                except requests.exceptions.RequestException as e:
-                    stats.add_error()
-                    stats.update_status(f"Error: {str(e)}")
-                    logger.error(f"Error processing {current_url}: {e}")
+                    # Update the live display
                     live.update(get_stats_panel(stats))
-                except Exception as e:
-                    stats.add_error()
-                    stats.update_status(f"Unexpected error: {str(e)}")
-                    logger.error(f"Unexpected error processing {current_url}: {e}")
-                    live.update(get_stats_panel(stats))
-                
-                # Update the live display
-                live.update(get_stats_panel(stats))
-                
+            
         except requests.exceptions.RequestException as e:
             stats.update_status(f"Initial connection failed: {str(e)}")
             logger.error(f"Failed to connect to {base_url}: {e}")
@@ -999,167 +1192,6 @@ def parse_arguments():
     
     return parser.parse_args()
 
-def direct_asset_clone(base_url, base_folder):
-    """
-    Directly clone a website by downloading HTML files and their assets.
-    This is a more direct approach for sites that use relative paths like ./assets/.
-    """
-    console.print(f"[bold green]Starting direct asset clone for[/bold green] {base_url}")
-    
-    # Parse base URL
-    parsed = urlparse(base_url)
-    base_domain = f"{parsed.scheme}://{parsed.netloc}"
-    
-    # Extract the base directory from the URL
-    base_dir = os.path.dirname(parsed.path)
-    if not base_dir.endswith('/'):
-        base_dir += '/'
-    
-    # Determine the output directory structure
-    if base_dir and base_dir != '/':
-        parts = base_dir.strip('/').split('/')
-        output_dir = os.path.join(base_folder, *parts)
-    else:
-        output_dir = base_folder
-    
-    # Ensure output directory exists
-    os.makedirs(output_dir, exist_ok=True)
-    
-    # First, get the index page
-    response = requests.get(base_url, headers=headers)
-    if response.status_code != 200:
-        console.print(f"[bold red]Failed to access[/bold red] {base_url}")
-        return
-    
-    # Parse HTML to find links to other pages and assets
-    soup = BeautifulSoup(response.text, 'html.parser')
-    
-    # Save the initial HTML file
-    index_filename = os.path.basename(parsed.path)
-    if not index_filename:
-        index_filename = 'index.html'
-    
-    index_path = os.path.join(output_dir, index_filename)
-    with open(index_path, 'w', encoding='utf-8') as f:
-        f.write(response.text)
-    
-    console.print(f"[green]Saved[/green] {index_path}")
-    
-    # Find all internal HTML links
-    html_links = set()
-    html_paths = [index_path]  # Keep track of all HTML files we download
-    
-    for a in soup.find_all('a', href=True):
-        href = a['href']
-        if href.startswith('./') and href.endswith('.html'):
-            html_links.add(href[2:])  # Remove ./ prefix
-        elif href.endswith('.html') and not href.startswith(('http://', 'https://')):
-            html_links.add(href)
-    
-    # Download all HTML files
-    for link in html_links:
-        link_url = urljoin(base_domain + base_dir, link)
-        output_path = os.path.join(output_dir, link)
-        
-        # Create directory if needed
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        
-        try:
-            response = requests.get(link_url, headers=headers)
-            if response.status_code == 200:
-                with open(output_path, 'w', encoding='utf-8') as f:
-                    f.write(response.text)
-                console.print(f"[green]Saved[/green] {output_path}")
-                html_paths.append(output_path)  # Add to our list of HTML files
-        except Exception as e:
-            console.print(f"[red]Failed to download[/red] {link_url}: {e}")
-    
-    # Collect all asset URLs from all HTML files
-    asset_urls = set()
-    
-    for html_path in html_paths:
-        try:
-            with open(html_path, 'r', encoding='utf-8') as f:
-                html_content = f.read()
-                page_soup = BeautifulSoup(html_content, 'html.parser')
-                
-                # CSS files
-                for css in page_soup.find_all('link', {'rel': 'stylesheet'}):
-                    if 'href' in css.attrs:
-                        href = css['href']
-                        if href.startswith('./'):
-                            asset_urls.add(href[2:])
-                
-                # JS files
-                for script in page_soup.find_all('script', src=True):
-                    src = script['src']
-                    if src.startswith('./'):
-                        asset_urls.add(src[2:])
-                
-                # Images
-                for img in page_soup.find_all('img', src=True):
-                    src = img['src']
-                    if src.startswith('./'):
-                        asset_urls.add(src[2:])
-                        
-                # Background images in style attributes
-                for elem in page_soup.find_all(style=True):
-                    style = elem['style']
-                    url_matches = re.findall(r'url\([\'"]?(.*?)[\'"]?\)', style)
-                    for url in url_matches:
-                        if url.startswith('./'):
-                            asset_urls.add(url[2:])
-                
-                # Images in srcset attribute
-                for img in page_soup.find_all('img', srcset=True):
-                    srcset = img['srcset']
-                    for src_item in srcset.split(','):
-                        src_parts = src_item.strip().split(' ')
-                        if src_parts and src_parts[0].startswith('./'):
-                            asset_urls.add(src_parts[0][2:])
-        except Exception as e:
-            console.print(f"[red]Failed to parse HTML file[/red] {html_path}: {e}")
-    
-    # Download all assets
-    total_assets = len(asset_urls)
-    downloaded = 0
-    
-    console.print(f"[bold blue]Found {total_assets} assets to download[/bold blue]")
-    
-    for asset_url_path in asset_urls:
-        asset_url = urljoin(base_domain + base_dir, asset_url_path)
-        output_path = os.path.join(output_dir, asset_url_path)
-        
-        # Create directory if needed
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        
-        try:
-            response = requests.get(asset_url, headers=headers)
-            if response.status_code == 200:
-                # Detect if binary content
-                content_type = response.headers.get('Content-Type', '')
-                is_binary = not content_type.startswith(('text/', 'application/json'))
-                
-                mode = 'wb' if is_binary else 'w'
-                content = response.content if is_binary else response.text
-                
-                with open(output_path, mode) as f:
-                    if is_binary:
-                        f.write(content)
-                    else:
-                        f.write(content)
-                downloaded += 1
-                
-                # Show progress
-                if downloaded % 10 == 0 or downloaded == total_assets:
-                    console.print(f"[green]Progress: {downloaded}/{total_assets} assets downloaded[/green]")
-        except Exception as e:
-            console.print(f"[red]Failed to download[/red] {asset_url}: {e}")
-    
-    console.print(f"[bold green]Direct asset clone completed for[/bold green] {base_url}")
-    console.print(f"[bold green]Downloaded {downloaded}/{total_assets} assets[/bold green]")
-    return output_dir
-
 if __name__ == "__main__":
     # Parse command line arguments if provided, otherwise use defaults
     try:
@@ -1171,7 +1203,7 @@ if __name__ == "__main__":
         debug = args.debug
     except:
         # Default values if no command line arguments are provided
-        target_url = "https://wpriverthemes.com/HTML/boldz/index.html"
+        target_url = "https://html.hixstudio.net/heiko-prev/heiko/index.html"
         folder_name = "cloned_website"
         min_delay = 1.0
         max_delay = 3.0
@@ -1179,11 +1211,5 @@ if __name__ == "__main__":
         console.print("[yellow]No command line arguments provided, using default values.[/yellow]")
         console.print("[yellow]To customize, run: python website_cloner.py [URL] -o [OUTPUT_FOLDER] --min-delay [MIN] --max-delay [MAX][/yellow]")
     
-    # Check if the URL has a specific structure that needs direct cloning
-    parsed_url = urlparse(target_url)
-    if parsed_url.path.endswith('.html') and ('/HTML/' in parsed_url.path or './assets/' in target_url):
-        # Use direct asset cloning for template-style websites
-        direct_asset_clone(target_url, folder_name)
-    else:
-        # Use recursive crawling for regular websites
-        clone_website(target_url, folder_name, min_delay, max_delay, debug)
+    # Use the unified website cloner which automatically detects site type
+    clone_website(target_url, folder_name, min_delay, max_delay, debug)
